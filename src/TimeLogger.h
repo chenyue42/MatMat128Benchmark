@@ -4,6 +4,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <string>
+#include <iostream>
 
 class TimeLogger {
 public:
@@ -36,6 +37,13 @@ public:
         return 0.0;
     }
 
+    void printThroughput(const std::string &section, const size_t size_mb) {
+        if (elapsedTimes.find(section) != elapsedTimes.end()) {
+            const double throughput = (size_mb) / (elapsedTimes[section] / 1000.0);
+            std::cout << section << ": " << throughput << " MB/s" << std::endl;
+        }
+    }
+
 private:
     TimeLogger() {}  // private constructor
 
@@ -51,5 +59,6 @@ private:
 #define TIME_START(section) TimeLogger::getInstance().start(section)
 #define TIME_END(section) TimeLogger::getInstance().end(section)
 #define GET_TIME(section) TimeLogger::getInstance().getTime(section)
+#define PRINT_THROUGHPUT(section, size) TimeLogger::getInstance().printThroughput(section, size)
 
 #endif // TIMELOGGER_H
