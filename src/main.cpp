@@ -105,10 +105,11 @@ void vec_square_64_128(const uint64_t *const __restrict A, uint128_t *__restrict
 void mat_vec_fp(const float *const __restrict A,
                 const float *const __restrict B, float *const __restrict out,
                 const size_t rows, const size_t cols) {
-#pragma GCC ivdep
+  float tmp = 0;
+// #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    float tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * B[k];
@@ -120,10 +121,11 @@ void mat_vec_fp(const float *const __restrict A,
 void mat_vec_double(const double *const __restrict A,
                 const double *const __restrict B, double *const __restrict out,
                 const size_t rows, const size_t cols) {
+  double tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    double tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC unroll 64
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * B[k];
@@ -135,10 +137,11 @@ void mat_vec_double(const double *const __restrict A,
 void mat_vec_16(const uint16_t *const __restrict A,
                 const uint16_t *const __restrict B, uint16_t *__restrict out,
                 const size_t rows, const size_t cols) {
+  uint16_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint16_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * B[k];
@@ -150,10 +153,11 @@ void mat_vec_16(const uint16_t *const __restrict A,
 void mat_vec_16_32(const uint16_t *const __restrict A,
                    const uint16_t *const __restrict B, uint32_t *__restrict out,
                    const size_t rows, const size_t cols){
+  uint32_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint32_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * (uint32_t)B[k];
@@ -167,10 +171,11 @@ void mat_vec_16_32(const uint16_t *const __restrict A,
 void mat_vec_32(const uint32_t *const __restrict A,
                 const uint32_t *const __restrict B, uint32_t *__restrict out,
                 const size_t rows, const size_t cols) {
+  uint32_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint32_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * B[k];
@@ -183,10 +188,11 @@ void mat_vec_32(const uint32_t *const __restrict A,
 void mat_vec_32_64(const uint32_t *const __restrict A,
                    const uint32_t *const __restrict B, uint64_t *__restrict out,
                    const size_t rows, const size_t cols) {
+  uint64_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint64_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * (uint64_t)B[k];
@@ -199,10 +205,11 @@ void mat_vec_32_64(const uint32_t *const __restrict A,
 void mat_vec_64(const uint64_t *const __restrict A,
                 const uint64_t *const __restrict B, uint64_t *__restrict out,
                 const size_t rows, const size_t cols) {
+  uint64_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint64_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
       tmp += A[offset + k] * B[k];
@@ -215,10 +222,11 @@ void mat_vec_64(const uint64_t *const __restrict A,
 void mat_vec_64_128(const uint64_t *const __restrict A,
                  const uint64_t *const __restrict B, uint128_t *__restrict out,
                  const size_t rows, const size_t cols) {
+  uint128_t tmp = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < rows; i++) {
-    uint128_t tmp = 0;
     const size_t offset = i * cols;
+    tmp = 0;
 #pragma GCC unroll 32
     for (size_t k = 0; k < cols; k++) {
       tmp += (uint128_t)A[offset + k] * B[k];
@@ -228,13 +236,29 @@ void mat_vec_64_128(const uint64_t *const __restrict A,
 }
 
 
+void mat_mat_fp(const float *__restrict A, const float *__restrict B,
+                float *__restrict out, const size_t rows, const size_t cols) {
+  float t0, t1;
+  for (size_t i = 0; i < rows; i++) {
+    t0 = 0; t1 = 0;
+    const size_t offset = i * cols;
+#pragma GCC ivdep unroll 128
+    for (size_t k = 0; k < cols; k++) {
+      t0 += A[offset + k] * B[b_cols * k];
+      t1 += A[offset + k] * B[b_cols * k + 1];
+    }
+    out[b_cols * i] = t0;
+    out[b_cols * i + 1] = t1;
+  }
+}
+
 void mat_mat_64(const uint64_t *__restrict A, const uint64_t *__restrict B,
                 uint64_t *__restrict out, const size_t rows, const size_t cols) {
   uint64_t t0, t1;
   for (size_t i = 0; i < rows; i++) {
     t0 = 0; t1 = 0;
     const size_t offset = i * cols;
-#pragma GCC ivdep unroll 128
+// #pragma GCC ivdep unroll 128
     for (size_t k = 0; k < cols; k++) {
       t0 += A[offset + k] * B[b_cols * k];
       t1 += A[offset + k] * B[b_cols * k + 1];
@@ -262,16 +286,16 @@ void mat_mat_64_128(const uint64_t *__restrict A, const uint64_t *__restrict B,
   }
 }
 
-void mat_mat_32_64(const uint32_t *__restrict A, const uint32_t *__restrict B,
+void mat_mat_32_64(const uint32_t *__restrict A, const uint64_t *__restrict B,
                 uint64_t *__restrict out, const size_t rows, const size_t cols) {
   uint64_t t0, t1;
   for (size_t i = 0; i < rows; i++) {
     t0 = 0; t1 = 0;
     const size_t offset = i * cols;
-    #pragma GCC unroll 64
+    // #pragma GCC ivdep unroll 64
     for (size_t k = 0; k < cols; k++) {
-      t0 += A[offset + k] * (uint64_t)B[b_cols * k];
-      t1 += A[offset + k] * (uint64_t)B[b_cols * k + 1];
+      t0 += (uint64_t)A[offset + k] * B[b_cols * k];
+      t1 += (uint64_t)A[offset + k] * B[b_cols * k + 1];
     }
     out[b_cols * i] = t0;
     out[b_cols * i + 1] = t1;
@@ -297,9 +321,11 @@ void mat_vec_64_Eigen(const uint64_t *A, const uint64_t *B, uint64_t *out,
 
 int main() {
   constexpr size_t experiments = 3;
-  constexpr size_t cols = 1<<8;
-  constexpr size_t rows_64 = 1<<18;
-  constexpr size_t rows_32 = 1<<19; // for 32-bit
+  constexpr size_t cols = (1<<8) + 123;
+  // constexpr size_t rows_64 = 1<<18;
+  constexpr size_t rows_64 = (1<<18) - 2043;
+  // constexpr size_t rows_32 = 1<<19; // for 32-bit
+  constexpr size_t rows_32 = (1<<18) - 2043;
   constexpr size_t rows_16 = 1<<20; // for 16-bit
 
   // Allocate matrices with the aligned allocator.
@@ -350,9 +376,9 @@ int main() {
 
 
   // print the address of the first element of each vector
-  std::cout << "Address of A: " << static_cast<void*>(A_64.data()) << std::endl;
-  std::cout << "Address of B: " << static_cast<void*>(B_64.data()) << std::endl;
-  std::cout << "Address of out64: " << static_cast<void*>(out_64.data()) << std::endl;
+  // std::cout << "Address of A: " << static_cast<void*>(A_64.data()) << std::endl;
+  // std::cout << "Address of B: " << static_cast<void*>(B_64.data()) << std::endl;
+  // std::cout << "Address of out64: " << static_cast<void*>(out_64.data()) << std::endl;
 
   // Initialize matrices with random values
   for (size_t i = 0; i < A_64.size(); i++) { A_64[i] = rand(); }
@@ -504,7 +530,7 @@ int main() {
   // ================== Naive matrix multiplication (32-bit).
   TIME_START("mat_mat_32_64");
   for (int i = 0; i < experiments; i++)
-    mat_mat_32_64(A_32.data(), B_32.data(), out_32_64.data(), rows_32, cols);
+    mat_mat_32_64(A_32.data(), B_64.data(), out_32_64.data(), rows_32, cols);
   TIME_END("mat_mat_32_64");
 
   // ================== Eigen matrix multiplication.
