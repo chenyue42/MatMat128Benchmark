@@ -5,7 +5,8 @@ project(MatMat128Benchmark)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_FLAGS "-O3 -MD -march=native -mtune=native")  # Enable all optimizations
+# set(CMAKE_CXX_FLAGS "-O3 -MD -march=native -mtune=native")  # Enable all optimizations
+set(CMAKE_CXX_FLAGS "-O3 -g -MD -march=native -mtune=native")  # Enable all optimizations
 
 find_package(Eigen3 REQUIRED)
 
