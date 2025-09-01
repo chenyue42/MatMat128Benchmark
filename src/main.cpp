@@ -3,173 +3,135 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
-#include <Eigen/Dense>
 #include <cmath>
+#include <immintrin.h>
+#include <Eigen/Dense>
 
 // Define uint128_t for GCC.
-typedef unsigned __int128 uint128_t;
-
-constexpr size_t b_cols = 2;  // BFV has two columns.
+using uint128_t = unsigned __int128;
+constexpr size_t b_cols = 2;
 
 // ./mlc --memory_bandwidth_scan -t1
 // 1MB = 1,000,000 bytes
 // result is about 13000 MB = 13000 * 1,000,000 / (2^30) ~= 12.1 GB
-uint32_t simple_read_32(const uint32_t *const __restrict A, const size_t size) {
+static inline uint32_t simple_read_32(const uint32_t *const __restrict a, const size_t size) {
   uint32_t sum = 0;
   #pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    sum += A[i];
+    sum += a[i];
   }
   return sum;
 }
 
 
-uint64_t simple_read_64(const uint64_t *const __restrict A, const size_t size) {
+static inline uint64_t simple_read_64(const uint64_t *const __restrict a, const size_t size) {
   uint64_t sum = 0;
   #pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    sum += A[i];
+    sum += a[i];
   }
   return sum;
 }
 
-float simple_read_float(const float *const __restrict A, const size_t size) {
-  float sum = 0;
-  // #pragma GCC ivdep
+
+// ========================== vector dot product ==========================
+static inline uint32_t vec_dot_32(const uint32_t *const __restrict a, const uint32_t *const __restrict b,
+                   const size_t size) {
+  uint32_t sum = 0;
+#pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    sum += A[i];
+    sum += a[i] * b[i];
   }
   return sum;
 }
 
-void simple_read_128(uint128_t *__restrict A, const size_t size, const uint128_t val) {
-  for (size_t i = 0; i < size; i++) {
-    A[i] += val;
-  }
-}
-
-
-
-// ========================== vector squared ==========================
-void vev_square_fp(const float *const __restrict A, float *__restrict out,
+static inline uint64_t vec_dot_32_64(const uint32_t *const __restrict a, const uint32_t *const __restrict b,
                    const size_t size) {
+  uint64_t sum = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    out[i] = A[i] * A[i];
+    sum += (uint64_t)a[i] *(uint64_t) b[i];
   }
+  return sum;
 }
 
-void vec_square_double(const double *const __restrict A, double *__restrict out,
-                   const size_t size) {
-#pragma GCC ivdep
-  for (size_t i = 0; i < size; i++) {
-    out[i] = A[i] * A[i];
-  }
-}
-
-void vec_square_32(const uint32_t *const __restrict A, uint32_t *__restrict out,
-                   const size_t size) {
-#pragma GCC ivdep
-  for (size_t i = 0; i < size; i++) {
-    out[i] = A[i] * A[i];
-  }
-}
-
-void vec_square_32_64(const uint32_t *const __restrict A, uint64_t *__restrict out,
-                   const size_t size) {
-#pragma GCC ivdep
-  for (size_t i = 0; i < size; i++) {
-    out[i] = (uint64_t)A[i] *(uint64_t) A[i];
-  }
-}
-
-void vec_square_64(const uint64_t *const __restrict A, uint64_t *__restrict out,
+static inline uint64_t vec_dot_64(const uint64_t *const __restrict a, const uint64_t *const __restrict b,
                    const size_t size){
+  uint64_t sum = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    out[i] = A[i] * A[i];
+    sum += a[i] * b[i];
   }
+  return sum;
 }
 
-void vec_square_64_128(const uint64_t *const __restrict A, uint128_t *__restrict out,
+static inline uint128_t vec_dot_64_128(const uint64_t *const __restrict a, const uint64_t *const __restrict b,
                    const size_t size) {
+  uint128_t sum = 0;
 #pragma GCC ivdep
   for (size_t i = 0; i < size; i++) {
-    out[i] = (uint128_t)A[i] * A[i];
+    sum += (uint128_t)a[i] * b[i];
   }
+  return sum;
+}
+
+// AVX2 kernel: dot product of two u32 vectors, accumulate into uint64_t
+static inline uint64_t dot_u32_u64_avx2(const uint32_t* __restrict a,
+  const uint32_t* __restrict b,
+  size_t n)
+{
+#if defined(__AVX2__)
+__m256i acc_even = _mm256_setzero_si256(); // sums a0*b0, a2*b2, ...
+__m256i acc_odd  = _mm256_setzero_si256(); // sums a1*b1, a3*b3, ...
+size_t i = 0;
+
+// process 8 elements per iter -> 4x 64-bit products per mul instruction
+for (; i + 8 <= n; i += 8) {
+__m256i va = _mm256_loadu_si256((const __m256i*)(a + i));
+__m256i vb = _mm256_loadu_si256((const __m256i*)(b + i));
+
+// even lanes: [a0,a2,a4,a6] * [b0,b2,b4,b6] -> 4x uint64_t
+__m256i prod_even = _mm256_mul_epu32(va, vb);
+
+// odd lanes: shift each 64-bit lane down by 32 to get [a1,a3,a5,a7], ditto for b
+__m256i va_hi = _mm256_srli_epi64(va, 32);
+__m256i vb_hi = _mm256_srli_epi64(vb, 32);
+__m256i prod_odd = _mm256_mul_epu32(va_hi, vb_hi);
+
+acc_even = _mm256_add_epi64(acc_even, prod_even);
+acc_odd  = _mm256_add_epi64(acc_odd,  prod_odd);
+}
+
+// horizontal add the two accumulators
+alignas(32) uint64_t buf[4];
+uint64_t sum = 0;
+_mm256_store_si256((__m256i*)buf, acc_even);
+sum += buf[0] + buf[1] + buf[2] + buf[3];
+_mm256_store_si256((__m256i*)buf, acc_odd);
+sum += buf[0] + buf[1] + buf[2] + buf[3];
+
+// tail
+for (; i < n; ++i) sum += (uint64_t)a[i] * (uint64_t)b[i];
+return sum;
+#else
+// compiled without AVX2: fall back to scalar
+uint64_t acc0=0, acc1=0, acc2=0, acc3=0;
+size_t i=0;
+for (; i+4<=n; i+=4) {
+acc0 += (uint64_t)a[i+0]*b[i+0];
+acc1 += (uint64_t)a[i+1]*b[i+1];
+acc2 += (uint64_t)a[i+2]*b[i+2];
+acc3 += (uint64_t)a[i+3]*b[i+3];
+}
+for (; i<n; ++i) acc0 += (uint64_t)a[i]*b[i];
+return (acc0+acc1)+(acc2+acc3);
+#endif
 }
 
 
 // ========================== matrix vector multiplication ==========================
-
-void mat_vec_fp(const float *const __restrict A,
-                const float *const __restrict B, float *const __restrict out,
-                const size_t rows, const size_t cols) {
-  float tmp = 0;
-// #pragma GCC ivdep
-  for (size_t i = 0; i < rows; i++) {
-    const size_t offset = i * cols;
-    tmp = 0;
-#pragma GCC ivdep
-    for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * B[k];
-    }
-    out[i] = tmp;
-  }
-}
-
-void mat_vec_double(const double *const __restrict A,
-                const double *const __restrict B, double *const __restrict out,
-                const size_t rows, const size_t cols) {
-  double tmp = 0;
-#pragma GCC ivdep
-  for (size_t i = 0; i < rows; i++) {
-    const size_t offset = i * cols;
-    tmp = 0;
-#pragma GCC unroll 64
-    for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * B[k];
-    }
-    out[i] = tmp;
-  }
-}
-
-void mat_vec_16(const uint16_t *const __restrict A,
-                const uint16_t *const __restrict B, uint16_t *__restrict out,
-                const size_t rows, const size_t cols) {
-  uint16_t tmp = 0;
-#pragma GCC ivdep
-  for (size_t i = 0; i < rows; i++) {
-    const size_t offset = i * cols;
-    tmp = 0;
-#pragma GCC ivdep
-    for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * B[k];
-    }
-    out[i] = tmp;
-  }
-}
-
-void mat_vec_16_32(const uint16_t *const __restrict A,
-                   const uint16_t *const __restrict B, uint32_t *__restrict out,
-                   const size_t rows, const size_t cols){
-  uint32_t tmp = 0;
-#pragma GCC ivdep
-  for (size_t i = 0; i < rows; i++) {
-    const size_t offset = i * cols;
-    tmp = 0;
-#pragma GCC ivdep
-    for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * (uint32_t)B[k];
-    }
-    out[i] = tmp;
-  }
-}
-
-
-
 void mat_vec_32(const uint32_t *const __restrict A,
-                const uint32_t *const __restrict B, uint32_t *__restrict out,
+                const uint32_t *const __restrict b, uint32_t *__restrict out,
                 const size_t rows, const size_t cols) {
   uint32_t tmp = 0;
 #pragma GCC ivdep
@@ -178,7 +140,7 @@ void mat_vec_32(const uint32_t *const __restrict A,
     tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * B[k];
+      tmp += A[offset + k] * b[k];
     }
     out[i] = tmp;
   }
@@ -186,7 +148,7 @@ void mat_vec_32(const uint32_t *const __restrict A,
 
 
 void mat_vec_32_64(const uint32_t *const __restrict A,
-                   const uint32_t *const __restrict B, uint64_t *__restrict out,
+                   const uint32_t *const __restrict b, uint64_t *__restrict out,
                    const size_t rows, const size_t cols) {
   uint64_t tmp = 0;
 #pragma GCC ivdep
@@ -195,15 +157,35 @@ void mat_vec_32_64(const uint32_t *const __restrict A,
     tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * (uint64_t)B[k];
+      tmp += A[offset + k] * (uint64_t)b[k];
     }
     out[i] = tmp;
   }
 }
 
+static inline void mat_vec_32_64_Eigen(const uint32_t *A, const uint32_t *b, uint64_t *out, size_t rows, size_t cols) {
+    Eigen::Map<const Eigen::Matrix<uint32_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matA(A, rows, cols);
+    Eigen::Map<const Eigen::Matrix<uint32_t, Eigen::Dynamic, 1>> matB(b, cols);
+    Eigen::Map<Eigen::Matrix<uint64_t, Eigen::Dynamic, 1>> matOut(out, rows);
+    
+    matOut.noalias() = matA.cast<uint64_t>() * matB.cast<uint64_t>();
+}
+
+
+// Optimized mat-vec: A is row-major rows×cols (u32), B has length cols (u32), out has length rows (uint64_t)
+void mat_vec_32_64_avx2(const uint32_t* __restrict A,
+  const uint32_t* __restrict b,
+  uint64_t* __restrict out,
+  size_t rows, size_t cols) {
+#pragma GCC ivdep
+  for (size_t i = 0; i < rows; ++i) {
+    const uint32_t* __restrict arow = A + i * cols;
+    out[i] = dot_u32_u64_avx2(arow, b, cols);
+  }
+}
 
 void mat_vec_64(const uint64_t *const __restrict A,
-                const uint64_t *const __restrict B, uint64_t *__restrict out,
+                const uint64_t *const __restrict b, uint64_t *__restrict out,
                 const size_t rows, const size_t cols) {
   uint64_t tmp = 0;
 #pragma GCC ivdep
@@ -212,7 +194,7 @@ void mat_vec_64(const uint64_t *const __restrict A,
     tmp = 0;
 #pragma GCC ivdep
     for (size_t k = 0; k < cols; k++) {
-      tmp += A[offset + k] * B[k];
+      tmp += A[offset + k] * b[k];
     }
     out[i] = tmp;
   }
@@ -220,7 +202,7 @@ void mat_vec_64(const uint64_t *const __restrict A,
 
 
 void mat_vec_64_128(const uint64_t *const __restrict A,
-                 const uint64_t *const __restrict B, uint128_t *__restrict out,
+                 const uint64_t *const __restrict b, uint128_t *__restrict out,
                  const size_t rows, const size_t cols) {
   uint128_t tmp = 0;
 #pragma GCC ivdep
@@ -229,29 +211,14 @@ void mat_vec_64_128(const uint64_t *const __restrict A,
     tmp = 0;
 #pragma GCC unroll 32
     for (size_t k = 0; k < cols; k++) {
-      tmp += (uint128_t)A[offset + k] * B[k];
+      tmp += (uint128_t)A[offset + k] * b[k];
     }
     out[i] = tmp;
   }
 }
 
 
-void mat_mat_fp(const float *__restrict A, const float *__restrict B,
-                float *__restrict out, const size_t rows, const size_t cols) {
-  float t0, t1;
-  for (size_t i = 0; i < rows; i++) {
-    t0 = 0; t1 = 0;
-    const size_t offset = i * cols;
-#pragma GCC ivdep unroll 128
-    for (size_t k = 0; k < cols; k++) {
-      t0 += A[offset + k] * B[b_cols * k];
-      t1 += A[offset + k] * B[b_cols * k + 1];
-    }
-    out[b_cols * i] = t0;
-    out[b_cols * i + 1] = t1;
-  }
-}
-
+// ========================== matrix matrix multiplication ==========================
 void mat_mat_64(const uint64_t *__restrict A, const uint64_t *__restrict B,
                 uint64_t *__restrict out, const size_t rows, const size_t cols) {
   uint64_t t0, t1;
@@ -269,7 +236,7 @@ void mat_mat_64(const uint64_t *__restrict A, const uint64_t *__restrict B,
 }
 
 
-void mat_mat_64_128(const uint64_t *__restrict A, const uint64_t *__restrict B,
+static inline void mat_mat_64_128(const uint64_t *__restrict A, const uint64_t *__restrict B,
                  uint128_t *__restrict out, const size_t rows,
                  const size_t cols) {
   uint128_t t0, t1;
@@ -286,13 +253,13 @@ void mat_mat_64_128(const uint64_t *__restrict A, const uint64_t *__restrict B,
   }
 }
 
-void mat_mat_32_64(const uint32_t *__restrict A, const uint64_t *__restrict B,
+static inline void mat_mat_32_64(const uint32_t *__restrict A, const uint32_t *__restrict B,
                 uint64_t *__restrict out, const size_t rows, const size_t cols) {
   uint64_t t0, t1;
   for (size_t i = 0; i < rows; i++) {
     t0 = 0; t1 = 0;
     const size_t offset = i * cols;
-    // #pragma GCC ivdep unroll 64
+    #pragma GCC unroll 32
     for (size_t k = 0; k < cols; k++) {
       t0 += (uint64_t)A[offset + k] * B[b_cols * k];
       t1 += (uint64_t)A[offset + k] * B[b_cols * k + 1];
@@ -302,290 +269,182 @@ void mat_mat_32_64(const uint32_t *__restrict A, const uint64_t *__restrict B,
   }
 }
 
-void mat_mat_64_Eigen(const uint64_t *A, const uint64_t *B, uint64_t *out,
-                      size_t rows, size_t cols) {
-    Eigen::Map<const Eigen::Matrix<uint64_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matA(A, rows, cols);
-    Eigen::Map<const Eigen::Matrix<uint64_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matB(B, cols, 2);
-    Eigen::Map<Eigen::Matrix<uint64_t, Eigen::Dynamic, 2, Eigen::RowMajor>> matOut(out, rows, 2);
-    
-    matOut.noalias() = matA * matB;
-}
-
-void mat_vec_64_Eigen(const uint64_t *A, const uint64_t *B, uint64_t *out,
-                      size_t rows, size_t cols) {
-    Eigen::Map<const Eigen::Matrix<uint64_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matA(A, rows, cols); Eigen::Map<const Eigen::Matrix<uint64_t, Eigen::Dynamic, 1>> matB(B, cols);
-    Eigen::Map<Eigen::Matrix<uint64_t, Eigen::Dynamic, 1>> matOut(out, rows);
-    
-    matOut.noalias() = matA * matB;
-}
 
 int main() {
-  constexpr size_t experiments = 3;
-  constexpr size_t cols = (1<<8) + 123;
-  // constexpr size_t rows_64 = 1<<18;
-  constexpr size_t rows_64 = (1<<18) - 2043;
-  // constexpr size_t rows_32 = 1<<19; // for 32-bit
-  constexpr size_t rows_32 = (1<<18) - 2043;
-  constexpr size_t rows_16 = 1<<20; // for 16-bit
+  constexpr size_t experiments = 20;
+  constexpr size_t cols = 1<<8; 
+  constexpr size_t rows_64 = 1<<17;
+  constexpr size_t rows_32 = rows_64 * 2;
+  constexpr size_t b_cols = 2;
 
-  // Allocate matrices with the aligned allocator.
+
+  // Allocate vectors for dot product tests
+  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> a_64(rows_64 * cols);
+  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> b_64(rows_64 * cols);
+  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> a_32(rows_32 * cols);
+  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> b_32(rows_32 * cols);
+
+  // Allocate matrics with the aligned allocator. 
   std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> A_64(rows_64 * cols);
-  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> B_64(b_cols * cols);
-  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> out_64(b_cols * rows_64);
-  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> out_32_64(b_cols * rows_32);
-  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> A_64_sqr_out(rows_64 * cols);
+  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> B_64(cols * b_cols);
+  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> out_64(rows_32 * b_cols); // allocate more for mat_mat_32_64
 
   std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> A_32(rows_32 * cols);
-  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> B_32(b_cols * cols);
-  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> out_32(b_cols * rows_32);
-  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> A_32_sqr_out(rows_32 * cols);
-  std::vector<uint64_t, AlignedAllocator<uint64_t, 64>> A_32_64_sqr_out(rows_32 * cols);
-
-  std::vector<uint16_t, AlignedAllocator<uint16_t, 64>> A_16(rows_16 * cols);
-  std::vector<uint16_t, AlignedAllocator<uint16_t, 64>> B_16(b_cols * cols);
-  std::vector<uint16_t, AlignedAllocator<uint16_t, 64>> out_16(b_cols * rows_16);
-
-  std::vector<float, AlignedAllocator<float, 64>> A_f(rows_32 * cols);
-  std::vector<float, AlignedAllocator<float, 64>> B_f(b_cols * cols);
-  std::vector<float, AlignedAllocator<float, 64>> out_f(b_cols * rows_32);
-  std::vector<float, AlignedAllocator<float, 64>> A_f_sqr_out(rows_32 * cols);
-
-  std::vector<double, AlignedAllocator<double, 64>> A_d(rows_64 * cols);
-  std::vector<double, AlignedAllocator<double, 64>> B_d(b_cols * cols);
-  std::vector<double, AlignedAllocator<double, 64>> out_d(b_cols * rows_64);
-  std::vector<double, AlignedAllocator<double, 64>> A_d_sqr_out(rows_64 * cols);
-
+  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> B_32(cols * b_cols);
+  std::vector<uint32_t, AlignedAllocator<uint32_t, 64>> out_32(rows_32 * b_cols);
   
-  // std::vector<uint128_t, AlignedAllocator<uint128_t, 64>> A_128(rows * cols);
-  std::vector<uint128_t, AlignedAllocator<uint128_t, 64>> out_128(b_cols * rows_64);
-  std::vector<uint128_t, AlignedAllocator<uint128_t, 64>> A_64_128_sqr_out(rows_64 * cols);
+  std::vector<uint128_t, AlignedAllocator<uint128_t, 64>> out_128(rows_64 * b_cols );
 
-  double size_16_MB = (A_16.size() * sizeof(uint16_t)) / (1024.0 * 1024.0);
-  double size_32_MB = (A_32.size() * sizeof(uint32_t)) / (1024.0 * 1024.0);
-  double size_64_MB = (A_64.size() * sizeof(uint64_t)) / (1024.0 * 1024.0);
-  // double size_128_MB = (A_128.size() * cols * sizeof(uint128_t)) / (1024.0 * 1024.0);
-  double size_f_MB = (A_f.size() * sizeof(float)) / (1024.0 * 1024.0);
-  double size_d_MB = (A_d.size() * sizeof(double)) / (1024.0 * 1024.0);
-  std::cout << "rows: " << rows_64 << ", cols: " << cols << std::endl;
-  std::cout << "Matrix A 16b Size: " << size_16_MB << " MB" << std::endl;
-  std::cout << "Matrix A 32b Size: " << size_32_MB << " MB" << std::endl;
-  std::cout << "Matrix A 64b Size: " << size_64_MB << " MB" << std::endl;
-  // std::cout << "Matrix A 128b Size: " << size_128_MB << " MB" << std::endl;
-  std::cout << "Matrix A float Size: " << size_f_MB << " MB" << std::endl;
-  std::cout << "Matrix A double Size: " << size_d_MB << " MB" << std::endl;
-
-
-  // print the address of the first element of each vector
-  // std::cout << "Address of A: " << static_cast<void*>(A_64.data()) << std::endl;
-  // std::cout << "Address of B: " << static_cast<void*>(B_64.data()) << std::endl;
-  // std::cout << "Address of out64: " << static_cast<void*>(out_64.data()) << std::endl;
 
   // Initialize matrices with random values
+  for (size_t i = 0; i < a_64.size(); i++) { a_64[i] = rand(); }
+  for (size_t i = 0; i < a_32.size(); i++) { a_32[i] = rand(); }
   for (size_t i = 0; i < A_64.size(); i++) { A_64[i] = rand(); }
   for (size_t i = 0; i < B_64.size(); i++) { B_64[i] = rand(); }
   for (size_t i = 0; i < A_32.size(); i++) { A_32[i] = rand(); }
   for (size_t i = 0; i < B_32.size(); i++) { B_32[i] = rand(); }
-  for (size_t i = 0; i < A_16.size(); i++) { A_16[i] = rand(); }
-  for (size_t i = 0; i < B_16.size(); i++) { B_16[i] = rand(); }
-  for (size_t i = 0; i < A_f.size(); i++) { A_f[i] = static_cast<float>(rand()); }
-  for (size_t i = 0; i < B_f.size(); i++) { B_f[i] = static_cast<float>(rand()); }
-  for (size_t i = 0; i < A_d.size(); i++) { A_d[i] = static_cast<double>(rand()); }
-  for (size_t i = 0; i < B_d.size(); i++) { B_d[i] = static_cast<double>(rand()); }
-  // for (size_t i = 0; i < A_128.size(); i++) { A_128[i] = rand(); }
 
   // ================== Simple read 32-bit.
   std::cout << "A_32.size(): " << A_32.size() << std::endl; 
   size_t tot_sum = 0;
   TIME_START("simple_read_32");
   for (int i = 0; i < experiments; i++)
-    // simple_read_32(A_32.data(), A_32.size(), rand());
     tot_sum += simple_read_32(A_32.data(), A_32.size());
   TIME_END("simple_read_32");
 
-  // ================== Simple read.
+  // ================== Simple read 64-bit.
   TIME_START("simple_read_64");
   for (int i = 0; i < experiments; i++)
-    // simple_read(A_64.data(), A_64.size(), rand());
     tot_sum += simple_read_64(A_64.data(), A_64.size());
   TIME_END("simple_read_64");
 
-  // // ================== Simple read 128-bit.
-  // TIME_START("simple_read_128");
-  // for (int i = 0; i < experiments; i++)
-  //   simple_read_128(A_128.data(), A_64.size(), rand());
-  // TIME_END("simple_read_128");
-
-  // ================== float vector squared 
-  TIME_START("vec_square_float");
+  // -------------------------- vector dot product --------------------------
+  // ================== 32-bit vector dot product
+  TIME_START("vec_dot_32");
   for (int i = 0; i < experiments; i++) {
-    vev_square_fp(A_f.data(), A_f_sqr_out.data(), A_f.size());
-    tot_sum += A_f_sqr_out[rand() % A_f_sqr_out.size()];
+    tot_sum += vec_dot_32(a_32.data(), b_32.data(), a_32.size());
   }
-  TIME_END("vec_square_float");
+  TIME_END("vec_dot_32");
 
-  // ================== double vector squared
-  TIME_START("vec_square_double");
+  // ================== 32-bit vector dot product (64-bit)
+  TIME_START("vec_dot_32_64");
   for (int i = 0; i < experiments; i++) {
-    vec_square_double(A_d.data(), A_d_sqr_out.data(), A_d.size());
-    tot_sum += A_d_sqr_out[rand() % A_d_sqr_out.size()];
+    tot_sum += vec_dot_32_64(a_32.data(), b_32.data(), a_32.size());
   }
-  TIME_END("vec_square_double");
+  TIME_END("vec_dot_32_64");
 
-  // ================== 32-bit vector squared
-  TIME_START("vec_square_32");
+  // ================== 64-bit vector dot product
+  TIME_START("vec_dot_64");
   for (int i = 0; i < experiments; i++) {
-    vec_square_32(A_32.data(), A_32_sqr_out.data(), A_32.size());
-    tot_sum += A_32_sqr_out[rand() % A_32_sqr_out.size()];
+    tot_sum += vec_dot_64(a_64.data(), b_64.data(), a_64.size());
   }
-  TIME_END("vec_square_32");
+  TIME_END("vec_dot_64");
 
-  // ================== 32-bit vector squared (64-bit)
-  TIME_START("vec_square_32_64");
+  // ================== 64-bit vector dot product (128-bit)
+  TIME_START("vec_dot_64_128");
   for (int i = 0; i < experiments; i++) {
-    vec_square_32_64(A_32.data(), A_32_64_sqr_out.data(), A_32.size());
-    tot_sum += A_32_64_sqr_out[rand() % A_32_64_sqr_out.size()];
+    tot_sum += vec_dot_64_128(a_64.data(), b_64.data(), a_64.size());
   }
-  TIME_END("vec_square_32_64");
+  TIME_END("vec_dot_64_128");
 
-  // ================== 64-bit vector squared
-  TIME_START("vec_square_64");
-  for (int i = 0; i < experiments; i++) {
-    vec_square_64(A_64.data(), A_64_sqr_out.data(), A_64.size());
-    tot_sum += A_64_sqr_out[rand() % A_64_sqr_out.size()];
-  }
-  TIME_END("vec_square_64");
-
-  // ================== 64-bit vector squared (128-bit)
-  TIME_START("vec_square_64_128");
-  for (int i = 0; i < experiments; i++) {
-    vec_square_64_128(A_64.data(), A_64_128_sqr_out.data(), A_64.size());
-    tot_sum += A_64_128_sqr_out[rand() % A_64_128_sqr_out.size()];
-  }
-  TIME_END("vec_square_64_128");
-
-
-  // ================== float matrix vector multiplication.
-  std::cout << "sizeof(float): " << sizeof(float) << std::endl;
-  TIME_START("mat_vec_float");
-  for (int i = 0; i < experiments; i++)
-    mat_vec_fp(A_f.data(), B_f.data(), out_f.data(), rows_32, cols);
-  TIME_END("mat_vec_float");
-
-  // ================== double matrix vector multiplication.
-  std::cout << "sizeof(double): " << sizeof(double) << std::endl;
-  TIME_START("mat_vec_double");
-  for (int i = 0; i < experiments; i++)
-    mat_vec_double(A_d.data(), B_d.data(), out_d.data(), rows_64, cols);
-  TIME_END("mat_vec_double");
-
-  // ================== 16-bit matrix vector multiplication.
-  std::cout << "sizeof(uint16_t): " << sizeof(uint16_t) << std::endl;
-  TIME_START("mat_vec_16");
-  for (int i = 0; i < experiments; i++)
-    mat_vec_16(A_16.data(), B_16.data(), out_16.data(), rows_16, cols);
-  TIME_END("mat_vec_16");
-
-  // ================== 16-bit matrix vector multiplication (32-bit).
-  TIME_START("mat_vec_16_32");
-  for (int i = 0; i < experiments; i++)
-    mat_vec_16_32(A_16.data(), B_16.data(), out_32.data(), rows_16, cols);
-  TIME_END("mat_vec_16_32");
-  
+  std::cout << "====== matrix vector multiplication =======" << std::endl;
   // ================== 32-bit matrix vector multiplication.
   TIME_START("mat_vec_32");
   for (int i = 0; i < experiments; i++)
     mat_vec_32(A_32.data(), B_32.data(), out_32.data(), rows_32, cols);
+  tot_sum += out_32[rand() % out_32.size()];
   TIME_END("mat_vec_32");
 
   // ================== 32-bit matrix vector multiplication (64-bit).
   TIME_START("mat_vec_32_64");
   for (int i = 0; i < experiments; i++)
     mat_vec_32_64(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
   TIME_END("mat_vec_32_64");
+
+  // ================== 32-bit matrix vector multiplication (AVX2).
+  TIME_START("mat_vec_32_64_avx2");
+  for (int i = 0; i < experiments; i++)
+    mat_vec_32_64_avx2(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
+  TIME_END("mat_vec_32_64_avx2");
+
+  TIME_START("mat_vec_32_64_Eigen");
+  for (int i = 0; i < experiments; i++)
+    mat_vec_32_64_Eigen(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
+  TIME_END("mat_vec_32_64_Eigen");
 
   // ================== 64-bit matrix vector multiplication.
   TIME_START("mat_vec_64");
   for (int i = 0; i < experiments; i++)
-    mat_vec_64(A_64.data(), B_64.data(), out_64.data(), rows_64, cols);
+    mat_vec_64(A_64.data(), b_64.data(), out_64.data(), rows_64, cols);
+  tot_sum += out_64[rand() % rows_64];
   TIME_END("mat_vec_64");
 
   // ================== 128-bit matrix vector multiplication.
   TIME_START("mat_vec_64_128");
   for (int i = 0; i < experiments; i++)
     mat_vec_64_128(A_64.data(), B_64.data(), out_128.data(), rows_64, cols);
+  tot_sum += out_128[rand() % rows_64];
   TIME_END("mat_vec_64_128");
 
+
+  // -------------------------- matrix matrix multiplication --------------------------
   // ================== 64-bit matrix multiplication.
   TIME_START("mat_mat_64");
   for (int i = 0; i < experiments; i++)
     mat_mat_64(A_64.data(), B_64.data(), out_64.data(), rows_64, cols);
+  tot_sum += out_64[rand() % rows_64];
   TIME_END("mat_mat_64");
 
   // ================== Naive matrix multiplication (128-bit).
   TIME_START("mat_mat_64_128");
   for (int i = 0; i < experiments; i++)
     mat_mat_64_128(A_64.data(), B_64.data(), out_128.data(), rows_64, cols);
+  tot_sum += out_128[rand() % out_128.size()];
   TIME_END("mat_mat_64_128");
 
   // ================== Naive matrix multiplication (32-bit).
   TIME_START("mat_mat_32_64");
   for (int i = 0; i < experiments; i++)
-    mat_mat_32_64(A_32.data(), B_64.data(), out_32_64.data(), rows_32, cols);
+    mat_mat_32_64(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
   TIME_END("mat_mat_32_64");
 
-  // ================== Eigen matrix multiplication.
-  TIME_START("mat_mat_eigen");
-  for (int i = 0; i < experiments; i++)
-    mat_mat_64_Eigen(A_64.data(), B_64.data(), out_64.data(), rows_64, cols);
-  TIME_END("mat_mat_eigen");
-
-  // ================== Eigen matrix vector multiplication.
-  TIME_START("mat_vec_eigen");
-  for (int i = 0; i < experiments; i++)
-    mat_vec_64_Eigen(A_64.data(), B_64.data(), out_64.data(), rows_64, cols);
-  TIME_END("mat_vec_eigen");
-
-  // ================== Performance analysis.
-  const size_t db_sz_64 = size_64_MB * experiments;  // 8 bytes per element
-  const size_t db_sz_32 = size_32_MB * experiments;  // 4 bytes per element
-  const size_t db_sz_16 = size_16_MB * experiments;  // 2 bytes per element
-  // const size_t db_sz_128 = size_128_MB * experiments; // 16 bytes per element
-  const size_t db_sz_f = size_f_MB * experiments;   // 4 bytes per element
-  const size_t db_sz_d = size_d_MB * experiments;   // 8 bytes per element
-
-
-  // std::cout << "mat_vec_float: " << GET_TIME("mat_vec_float") / experiments << " ms" << std::endl;
   std::cout << "tot_sum: " << tot_sum << std::endl;
+  // ================== Performance analysis.
+  const double mat_32_MB = (A_32.size() * sizeof(uint32_t)) / (1024.0 * 1024.0);
+  const double mat_64_MB = (A_64.size() * sizeof(uint64_t)) / (1024.0 * 1024.0);
+  const double vec_32_MB = (a_32.size() * sizeof(uint32_t)) / (1024.0 * 1024.0);
+  const double vec_64_MB = (a_64.size() * sizeof(uint64_t)) / (1024.0 * 1024.0);
+  std::cout << "rows: " << rows_64 << ", cols: " << cols << std::endl;
+  std::cout << "Vector A 64b Size: " << a_64.size() * sizeof(uint64_t) / (1024.0 * 1024.0) << " MB" << std::endl;
+  std::cout << "Vector A 32b Size: " << a_32.size() * sizeof(uint32_t) / (1024.0 * 1024.0) << " MB" << std::endl;
+  std::cout << "Matrix A 32b Size: " << mat_32_MB << " MB" << std::endl;
+  std::cout << "Matrix A 64b Size: " << mat_64_MB << " MB" << std::endl;
 
-
+  // Fair bandwidth metrics including A, B, and out for mat-vec and mat-mat
+  const double MB = (1024.0 * 1024.0);
+  const double total_size = MB / experiments;
 
   std::cout << "====== reading DB and add constant =======" << std::endl;
-  PRINT_THROUGHPUT("simple_read_32", db_sz_32);
-  PRINT_THROUGHPUT("simple_read_64", db_sz_64);
-  PRINT_THROUGHPUT("simple_read_float", db_sz_f);
-  // PRINT_THROUGHPUT("simple_read_128", db_sz_128);
-  std::cout << "====== vector squared =======" << std::endl;
-  PRINT_THROUGHPUT("vec_square_float", db_sz_f);
-  PRINT_THROUGHPUT("vec_square_double", db_sz_d);
-  PRINT_THROUGHPUT("vec_square_32", db_sz_32);
-  PRINT_THROUGHPUT("vec_square_32_64", db_sz_32);
-  PRINT_THROUGHPUT("vec_square_64", db_sz_64);
-  PRINT_THROUGHPUT("vec_square_64_128", db_sz_64);
+  PRINT_THROUGHPUT("simple_read_32", vec_32_MB * experiments);
+  PRINT_THROUGHPUT("simple_read_64", vec_64_MB * experiments);
+  std::cout << "====== vector dot product =======" << std::endl;
+  PRINT_THROUGHPUT("vec_dot_32", vec_32_MB * experiments);
+  PRINT_THROUGHPUT("vec_dot_32_64", vec_32_MB * experiments);
+  PRINT_THROUGHPUT("vec_dot_64", vec_64_MB * experiments);
+  PRINT_THROUGHPUT("vec_dot_64_128", vec_64_MB * experiments);
   std::cout << "====== matrix * vector =======" << std::endl;
-  PRINT_THROUGHPUT("mat_vec_float", db_sz_f);
-  PRINT_THROUGHPUT("mat_vec_double", db_sz_d);
-  PRINT_THROUGHPUT("mat_vec_16", db_sz_16);
-  PRINT_THROUGHPUT("mat_vec_16_32", db_sz_16);
-  PRINT_THROUGHPUT("mat_vec_32", db_sz_32);
-  PRINT_THROUGHPUT("mat_vec_32_64", db_sz_32);
-  PRINT_THROUGHPUT("mat_vec_64", db_sz_64);
-  PRINT_THROUGHPUT("mat_vec_64_128", db_sz_64);
-  std::cout << "====== matrix * 2 columns =======" << std::endl;
-  PRINT_THROUGHPUT("mat_mat_64", db_sz_64);
-  PRINT_THROUGHPUT("mat_mat_64_128", db_sz_64);
-  PRINT_THROUGHPUT("mat_mat_32_64", db_sz_32);
-  PRINT_THROUGHPUT("mat_mat_eigen", db_sz_64);
-  PRINT_THROUGHPUT("mat_vec_eigen", db_sz_64);
-  
+  PRINT_THROUGHPUT("mat_vec_32", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_vec_32_64", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_vec_32_64_Eigen", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_vec_32_64_avx2", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_vec_64", mat_64_MB * experiments);
+  PRINT_THROUGHPUT("mat_vec_64_128", mat_64_MB * experiments);
+  std::cout << "====== matrix * matrix =======" << std::endl;
+  PRINT_THROUGHPUT("mat_mat_64_128", mat_64_MB * experiments);
+  PRINT_THROUGHPUT("mat_mat_32_64", mat_32_MB * experiments);  
   return 0;
 }
