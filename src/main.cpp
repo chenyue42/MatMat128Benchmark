@@ -269,6 +269,66 @@ static inline void mat_mat_32_64(const uint32_t *__restrict A, const uint32_t *_
   }
 }
 
+static inline void mat_mat_32_64_Eigen(const uint32_t *__restrict A, const uint32_t *__restrict B,
+                uint64_t *__restrict out, const size_t rows, const size_t cols) {
+  Eigen::Map<const Eigen::Matrix<uint32_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matA(A, rows, cols);
+  Eigen::Map<const Eigen::Matrix<uint32_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matB(B, cols, b_cols);
+  Eigen::Map<Eigen::Matrix<uint64_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>> matOut(out, rows, b_cols);
+  // Two casts allocate temporaries each call; very expensive in tight loop.
+  matOut.noalias() = matA.cast<uint64_t>() * matB.cast<uint64_t>();
+}
+
+void mat_mat_32_64_avx512(const uint32_t *A, const uint32_t *B, uint64_t *out,
+                          size_t rows, size_t cols) {
+  for (size_t i = 0; i < rows; ++i) {
+    const uint32_t *arow = A + i * cols;
+    __m512i acc0 = _mm512_setzero_si512(); // accumulates A*B[:,0]
+    __m512i acc1 = _mm512_setzero_si512(); // accumulates A*B[:,1]
+
+    size_t k = 0;
+    const size_t step = 8; // 8 x uint64 lanes => 8 pairs (16 uint32)
+    for (; k + step <= cols; k += step) {
+      // Load 8 A values (uint32) and replicate each into both half-words of a
+      // 64-bit lane
+      __m256i a32 = _mm256_loadu_si256((const __m256i *)(arow + k));
+      __m512i a64 = _mm512_cvtepu32_epi64(a32);
+      __m512i a64_hi = _mm512_slli_epi64(a64, 32);
+      __m512i a_rep = _mm512_or_si512(a64, a64_hi); // [a|a] per 64-bit lane
+
+      // Load 8 pairs [B0, B1, B0, B1, ...] as 64-byte chunk
+      const uint32_t *bptr = B + (k * b_cols);
+      __m512i b_pairs = _mm512_loadu_si512(
+          (const void *)bptr); // each 64-bit lane: low=B0, high=B1
+
+      // Multiply low 32 bits: A * B0
+      acc0 = _mm512_add_epi64(acc0, _mm512_mul_epu32(a_rep, b_pairs));
+      // Multiply high 32 bits: A * B1 (shift B's high 32 down to low)
+      __m512i b_hi = _mm512_srli_epi64(b_pairs, 32);
+      acc1 = _mm512_add_epi64(acc1, _mm512_mul_epu32(a_rep, b_hi));
+    }
+
+    // horizontal sum of 8x u64 in each accumulator
+    alignas(64) uint64_t tmp0[8];
+    alignas(64) uint64_t tmp1[8];
+    _mm512_store_si512((__m512i *)tmp0, acc0);
+    _mm512_store_si512((__m512i *)tmp1, acc1);
+    uint64_t t0 = 0, t1 = 0;
+    for (int x = 0; x < 8; ++x) {
+      t0 += tmp0[x];
+      t1 += tmp1[x];
+    }
+
+    // tail
+    for (; k < cols; ++k) {
+      uint64_t a = arow[k];
+      t0 += a * (uint64_t)B[k * b_cols + 0];
+      t1 += a * (uint64_t)B[k * b_cols + 1];
+    }
+
+    out[b_cols * i + 0] = t0;
+    out[b_cols * i + 1] = t1;
+  }
+}
 
 int main() {
   constexpr size_t experiments = 20;
@@ -412,6 +472,12 @@ int main() {
   tot_sum += out_64[rand() % out_64.size()];
   TIME_END("mat_mat_32_64");
 
+  TIME_START("mat_mat_32_64_avx512");
+  for (int i = 0; i < experiments; i++)
+    mat_mat_32_64_avx512(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
+  TIME_END("mat_mat_32_64_avx512");
+
   std::cout << "tot_sum: " << tot_sum << std::endl;
   // ================== Performance analysis.
   const double mat_32_MB = (A_32.size() * sizeof(uint32_t)) / (1024.0 * 1024.0);
@@ -446,5 +512,6 @@ int main() {
   std::cout << "====== matrix * matrix =======" << std::endl;
   PRINT_THROUGHPUT("mat_mat_64_128", mat_64_MB * experiments);
   PRINT_THROUGHPUT("mat_mat_32_64", mat_32_MB * experiments);  
+  PRINT_THROUGHPUT("mat_mat_32_64_avx512", mat_32_MB * experiments);
   return 0;
 }
