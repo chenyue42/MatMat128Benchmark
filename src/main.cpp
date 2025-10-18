@@ -11,9 +11,6 @@
 using uint128_t = unsigned __int128;
 constexpr size_t b_cols = 2;
 
-// ./mlc --memory_bandwidth_scan -t1
-// 1MB = 1,000,000 bytes
-// result is about 13000 MB = 13000 * 1,000,000 / (2^30) ~= 12.1 GB
 static inline uint32_t simple_read_32(const uint32_t *const __restrict a, const size_t size) {
   uint32_t sum = 0;
   #pragma GCC ivdep
@@ -225,7 +222,7 @@ void mat_mat_64(const uint64_t *__restrict A, const uint64_t *__restrict B,
   for (size_t i = 0; i < rows; i++) {
     t0 = 0; t1 = 0;
     const size_t offset = i * cols;
-// #pragma GCC ivdep unroll 128
+#pragma GCC unroll 32
     for (size_t k = 0; k < cols; k++) {
       t0 += A[offset + k] * B[b_cols * k];
       t1 += A[offset + k] * B[b_cols * k + 1];
@@ -251,7 +248,7 @@ static inline void mat_mat_64_128(const uint64_t *__restrict A, const uint64_t *
     out[b_cols * i] = t0;
     out[b_cols * i + 1] = t1;
   }
-}
+} 
 
 static inline void mat_mat_32_64(const uint32_t *__restrict A, const uint32_t *__restrict B,
                 uint64_t *__restrict out, const size_t rows, const size_t cols) {
@@ -259,7 +256,7 @@ static inline void mat_mat_32_64(const uint32_t *__restrict A, const uint32_t *_
   for (size_t i = 0; i < rows; i++) {
     t0 = 0; t1 = 0;
     const size_t offset = i * cols;
-    #pragma GCC unroll 32
+    #pragma GCC unroll 128
     for (size_t k = 0; k < cols; k++) {
       t0 += (uint64_t)A[offset + k] * B[b_cols * k];
       t1 += (uint64_t)A[offset + k] * B[b_cols * k + 1];
@@ -288,23 +285,15 @@ void mat_mat_32_64_avx512(const uint32_t *A, const uint32_t *B, uint64_t *out,
     size_t k = 0;
     const size_t step = 8; // 8 x uint64 lanes => 8 pairs (16 uint32)
     for (; k + step <= cols; k += step) {
-      // Load 8 A values (uint32) and replicate each into both half-words of a
-      // 64-bit lane
-      __m256i a32 = _mm256_loadu_si256((const __m256i *)(arow + k));
-      __m512i a64 = _mm512_cvtepu32_epi64(a32);
-      __m512i a64_hi = _mm512_slli_epi64(a64, 32);
-      __m512i a_rep = _mm512_or_si512(a64, a64_hi); // [a|a] per 64-bit lane
-
-      // Load 8 pairs [B0, B1, B0, B1, ...] as 64-byte chunk
-      const uint32_t *bptr = B + (k * b_cols);
-      __m512i b_pairs = _mm512_loadu_si512(
-          (const void *)bptr); // each 64-bit lane: low=B0, high=B1
-
-      // Multiply low 32 bits: A * B0
-      acc0 = _mm512_add_epi64(acc0, _mm512_mul_epu32(a_rep, b_pairs));
-      // Multiply high 32 bits: A * B1 (shift B's high 32 down to low)
-      __m512i b_hi = _mm512_srli_epi64(b_pairs, 32);
-      acc1 = _mm512_add_epi64(acc1, _mm512_mul_epu32(a_rep, b_hi));
+      __m256i a32 = _mm256_loadu_si256((const __m256i*)(arow + k)); // Loading 8×u32 from matrix A
+      __m512i a64 = _mm512_cvtepu32_epi64(a32);                     // Converting to 8×u64 for multiplication
+      
+      const uint32_t* bptr = B + k*2;                               // 2 columns
+      __m512i b_pairs = _mm512_loadu_si512((const void*)bptr);      // Loading [B0,B1] pairs from matrix B
+      
+      acc0 = _mm512_add_epi64(acc0, _mm512_mul_epu32(a64, b_pairs));      // A*B0
+      __m512i b1 = _mm512_srli_epi64(b_pairs, 32);                         // bring B1 low
+      acc1 = _mm512_add_epi64(acc1, _mm512_mul_epu32(a64, b1));            // A*B1
     }
 
     // horizontal sum of 8x u64 in each accumulator
@@ -331,8 +320,9 @@ void mat_mat_32_64_avx512(const uint32_t *A, const uint32_t *B, uint64_t *out,
 }
 
 int main() {
-  constexpr size_t experiments = 20;
-  constexpr size_t cols = 1<<8; 
+  constexpr size_t experiments = 10;
+  // constexpr size_t cols = 1<<9; 
+  constexpr size_t cols = 473;
   constexpr size_t rows_64 = 1<<17;
   constexpr size_t rows_32 = rows_64 * 2;
   constexpr size_t b_cols = 2;
@@ -364,9 +354,10 @@ int main() {
   for (size_t i = 0; i < A_32.size(); i++) { A_32[i] = rand(); }
   for (size_t i = 0; i < B_32.size(); i++) { B_32[i] = rand(); }
 
+  size_t tot_sum = 0;
+
   // ================== Simple read 32-bit.
   std::cout << "A_32.size(): " << A_32.size() << std::endl; 
-  size_t tot_sum = 0;
   TIME_START("simple_read_32");
   for (int i = 0; i < experiments; i++)
     tot_sum += simple_read_32(A_32.data(), A_32.size());
@@ -472,6 +463,20 @@ int main() {
   tot_sum += out_64[rand() % out_64.size()];
   TIME_END("mat_mat_32_64");
 
+  // ================== Eigen matrix multiplication (32->64-bit).
+  TIME_START("mat_mat_32_64_Eigen");
+  for (int i = 0; i < experiments; i++)
+    mat_mat_32_64_Eigen(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  tot_sum += out_64[rand() % out_64.size()];
+  TIME_END("mat_mat_32_64_Eigen");
+
+  // // ================== AVX2 matrix multiplication (32->64-bit).
+  // TIME_START("mat_mat_32_64_avx2");
+  // for (int i = 0; i < experiments; i++)
+  //   mat_mat_32_64_avx2(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
+  // tot_sum += out_64[rand() % out_64.size()];
+  // TIME_END("mat_mat_32_64_avx2");
+
   TIME_START("mat_mat_32_64_avx512");
   for (int i = 0; i < experiments; i++)
     mat_mat_32_64_avx512(A_32.data(), B_32.data(), out_64.data(), rows_32, cols);
@@ -510,8 +515,13 @@ int main() {
   PRINT_THROUGHPUT("mat_vec_64", mat_64_MB * experiments);
   PRINT_THROUGHPUT("mat_vec_64_128", mat_64_MB * experiments);
   std::cout << "====== matrix * matrix =======" << std::endl;
+  PRINT_THROUGHPUT("mat_mat_64", mat_64_MB * experiments);
   PRINT_THROUGHPUT("mat_mat_64_128", mat_64_MB * experiments);
   PRINT_THROUGHPUT("mat_mat_32_64", mat_32_MB * experiments);  
+  PRINT_THROUGHPUT("mat_mat_32_64_Eigen", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_mat_32_64_avx2", mat_32_MB * experiments);
   PRINT_THROUGHPUT("mat_mat_32_64_avx512", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_mat_vert_32_64", mat_32_MB * experiments);
+  PRINT_THROUGHPUT("mat_mat_vert_32_64_avx512", mat_32_MB * experiments);
   return 0;
 }

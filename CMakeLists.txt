@@ -21,15 +21,22 @@ if (NOT Eigen3_FOUND)
   FetchContent_MakeAvailable(eigen)
 endif()
 
-# Create executable from the source files
-add_executable(benchmark src/main.cpp)
+# Create executables for each benchmark type
+add_executable(simple_read src/main_simple_read.cpp)
+add_executable(vec_dot     src/main_vec_dot.cpp)
+add_executable(mat_vec     src/main_mat_vec.cpp)
+add_executable(mat_mat2    src/main_mat_mat2.cpp)
+add_executable(full_bench  src/main.cpp)
 
-if (TARGET Eigen3::Eigen)
-  target_link_libraries(benchmark Eigen3::Eigen)
-else()
-  # Fallback: include directory if target isn't defined (older Eigen)
-  if (eigen_SOURCE_DIR)
-    target_include_directories(benchmark PRIVATE ${eigen_SOURCE_DIR})
+# Link Eigen or include it for each target
+set(_BENCH_TARGETS simple_read vec_dot mat_vec mat_mat2 full_bench)
+foreach(t ${_BENCH_TARGETS})
+  if (TARGET Eigen3::Eigen)
+    target_link_libraries(${t} Eigen3::Eigen)
+  else()
+    if (eigen_SOURCE_DIR)
+      target_include_directories(${t} PRIVATE ${eigen_SOURCE_DIR})
+    endif()
   endif()
-endif()
+endforeach()
 
